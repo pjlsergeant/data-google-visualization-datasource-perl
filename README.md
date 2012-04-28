@@ -1,4 +1,1 @@
-data-google-visualization-datasource-perl
-=========================================
-
-Create data sources for the Google Visualization API
+THIS IS NOT IN ANY SHAPE READY FOR USE YET
