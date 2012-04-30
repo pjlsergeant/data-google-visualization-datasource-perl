@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Moose;
+use Clone::Fast qw/clone/;
 
 =head1 NAME
 
@@ -54,24 +55,45 @@ There's quite a bit of logic around how to craft a response, how to throw
 errors, how to throw warnings, etc. After some thought, I have discovered an
 interface that hopefully won't make you want to throw yourself off a cliff.
 
-=head2 Container Creation
-
 At its essence, Google Datasources allow querying clients to specify a I<lot>
 about what they want the response to look like. This information is specified
 in the C<tqx> parameter
 (L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>)
 and also somewhat implied by the existence of an C<X-DataSource-Auth> header.
 
+In order to use this module, you will need to create a container for the
+outgoing data. This is as easy as passing in whatever the caller gave you as
+their C<tqx> parameter.
+
+You then set any data and any messages you wish to. This is your chance to tell
+the user they're not logged in, or you can't connect to the database, or - if
+everything worked out, build and set the
+L<Data::Google::Visualization::DataTable> object they're ultimately requesting.
+
+Finally, serialize attempts to build the response, checking the messages to see
+if we should return an error or actual data, and giving you appropriate headers
+and the body itself.
+
+=head2 Container Creation
+
 Our first job is to specify what the response container will look like, and the
 easiest way to do this is to pass C<new()> the contents of the C<tqx> parameter
 and the C<X-DataSource-Auth> header.
+
+=head3 new()
+
+ # Give the user what they requested
+ ->new({ tqx => $q->param('tqx') });
+
+ # Set it by hand...
+ ->new({ reqId => 3, out => 'json', sig => 'deadbeef' });
 
 C<new()> will set the following object attributes based on this, all based on
 the I<Request Format> linked above:
 
 =over 4
 
-=item C<reqID> - allegedy required, and required to be an int. In fact, the
+=item C<reqId> - allegedy required, and required to be an int. In fact, the
 documentation reveals that if you leave it blank, it should default to 0.
 
 =item C<version> - allows the calling client to specify the version of the API
@@ -87,8 +109,8 @@ per L<Adding Messages> below.
 =item C<out> - output format. This defaults to C<json>, although whether JSON or
 JSONP is returned depends on if C<X-DataSource-Auth> has been included - see the
 Google docs. Other formats are theoretically provided for, but this version of
-the software doesn't support them, and will add an C<error> message if they're
-specified.
+the software doesn't support them, and will add an C<error> message (at
+serialization time) if they're specified.
 
 =item C<responseHandler> - in the case of our outputting JSONP, we wrap our
 payload in a function call to this method name. It defaults to
@@ -103,6 +125,40 @@ should be returned as a named file. This is simply ignored in this version.
 will cause us to output JSON instead of using the C<responseHandler>.
 
 =back
+
+=cut
+
+# Inputs
+has 'datatable' =>
+    ( is => 'rw', isa => 'Data::Google::Visualization::DataTable' );
+has 'datasource_auth' =>
+    ( is => 'rw', isa => 'Str', required => 0 );
+has 'reqId' => # Set to Str as we only want to throw an error at inst time
+    ( is => 'rw', isa => 'Str', default => 0 );
+has 'version' =>
+    ( is => 'rw', isa => 'Str', required => 0 );
+has 'sig' =>
+    ( is => 'rw', isa => 'Str', required => 0 );
+has 'out' =>
+    ( is => 'rw', isa => 'Str', default => 'json' );
+has 'responseHandler' =>
+    ( is => 'rw', isa => 'Str', default => 'google.visualization.Query.setResponse' );
+has 'outFileName' =>
+    ( is => 'rw', isa => 'Str', required => 0 );
+
+around BUILDARGS => sub {
+    my $orig  = shift;
+    my $class = shift;
+
+    my $options = shift;
+    my $tqx = delete $options->{'tqx'} || '';
+    for my $option ( split(/;/, $tqx ) ) {
+        my ( $key, $value ) = split(/;/, $option);
+        $options->{ $key } = $value;
+    }
+
+    $class->$orig( $options );
+};
 
 =head2 Adding Messages
 
@@ -128,6 +184,12 @@ algorithm is used:
  3. If there are no warning or error messages, set the response status to 'ok',
     and include the DataTable in the response.
 
+When messages are described as discarded, they are not included in the returned
+C<body> - they're still available to the developer in the returned C<messages>.
+See the documentation on C<serialize> below.
+
+=head3 add_message()
+
 Messages are added using the C<add_message> method:
 
  $datasource->add_message({
@@ -136,6 +198,20 @@ Messages are added using the C<add_message> method:
     message => 'Unauthorized User', # Optional
     detailed_message => 'Please login to use the service' # Optional
  });
+
+=cut
+
+has 'messages' => ( is => 'rw', isa => 'HashRef[ArrayRef]',
+    default => sub {
+        { errors => [], warnings => [] }
+    } );
+
+die "Implement add_message";
+sub add_message {
+
+}
+
+=head3 datatable
 
 The datatable is added via the C<datatable> method:
 
@@ -147,7 +223,157 @@ be checked.
 
 =head2 Generating Output
 
-ADD STUFF HERE ABOUT THE DIFFERENT HEADERS WE MIGHT ADD.
+Up to this point, we've just accumulated data without actually acting on it. If
+the user has specified some inputs we can't handle, well we haven't checked that
+yet.
+
+To kick the whole circus off, call C<serialize>.
+
+=head3 serialize
+
+ my ( $headers, $body, $messages ) = $datasource->serialize();
+
+Serialize accepts no arguments, and does not change the state of the underlying
+object. It returns:
+
+B<headers>
+
+An arrayref or arrayrefs, which in B<this version of this module> will always
+be:
+
+ [[ 'Content-Type', 'text/javascript' ]]
+
+However, don't use that knowledge, as future versions will definitely add new
+headers, based on other user options - C<Content-Disposition>, for starters.
+You should return all received headers to the user. As future versions will
+allow returning of different data types, you must allow control of
+C<Content-Type> and C<Content-Disposition> to fall to this module in their
+entirity.
+
+B<body>
+
+A JSON-like string containing the response. Google JSON is not real JSON (see
+the continually linked documentation), and what's more, this may well be JSONP
+instead. This string will come back UTF-8 encoded, so make sure whatever you're
+serving this with doesn't re-encode that.
+
+B<messages>
+
+ {
+    errors => [
+        {
+            reason  => 'not_modified',
+            message => 'Data not modified'
+        }
+    ]
+    warnings => []
+ }
+
+A hashref of arrayrefs containing all messages raised. You B<must not> show this
+to the user - it's purely for your own debugging. When we talk about messages
+being discarded in the L<Adding Messages> section, they will turn up here
+instead. B<DO NOT MAKE DECISIONS ABOUT WHAT TO RETURN TO THE USER BY POKING
+THROUGH THIS DATA>. The C<not_modified> error is a great example of why not - it
+is not an error for the user, and the user has to act a certain way on getting
+it - it's expected in the normal course of use.
+
+=cut
+
+
+ 1. Have any error messages been added? If so, discard all but the first, set
+    the response status to 'error', and discard the DataTable and all warning
+    messages. We discard all the other messages (error and warning) to prevent
+    malicious data discovery.
+
+ 2. An integrity check is run on the attributes that have been set. We check the
+    attributes listed above, and generate any needed messages from those. If we
+    generate any error messages, step 1 is rerun.
+
+ 2. Have any warning messages been added? If so, set the response status to
+    'warning'. Include all warning messages and the DataTable in the response.
+
+ 3. If there are no warning or error messages, set the response status to 'ok',
+    and include the DataTable in the response.
+
+sub serialize {
+    my $self = shift;
+
+    # First build the minimal payload, based on inputs
+    my $payload = {
+        version => 0.6,
+        reqId   => 0 + ($self->reqId || 0),
+    };
+
+    # Build the default headers
+    my $headers = [
+        [ 'Content-Type', 'text/javascript' ]
+    ];
+
+    # Work with the messages
+    if ( $self->messages->{'errors'}->[0] ) {
+        # Set the status to error
+        $payload->{'status'} = 'error';
+
+        # Don't include more than the first, as per the docs
+        $payload->{'errors'} = [ %{ $self->messages->{'errors'}->[0] } ];
+
+        # We don't actually have anything more to add at this point, except the
+        # type-appropriate wrapping.
+        return $header, $self->_wrap( $payload ), clone( $self->messages );
+
+    } elsif ( $self->messages->{'warnings'}->[0] ) {
+        # Set the status to warning
+        $payload->{'status'} = 'warning'
+    }
+
+    # Add any data
+    # Check for non-modified via sig
+    # Generate the payload, again
+    # Wrap it as appropriate
+    # Hand it all back to the user
+}
+
+=head1 BUGS, TODO
+
+It'd be nice to support the other data types, but currently
+L<Data::Google::Visualization::DataTable> serializes its data a little too early
+which makes this impracticle. I tend to do hassle-related development, so if you
+are in desparate need of this feature, I recommend emailing me.
+
+=head1 SUPPORT
+
+If you find a bug, please use
+L<this modules page on the CPAN bug tracker|https://rt.cpan.org/Ticket/Create.html?Queue=Data-Google-Visualization-DataSource>
+to raise it, or I might never see.
+
+=head1 AUTHOR
+
+Peter Sergeant C<pete@clueball.com> on behalf of
+L<Investor Dynamics|http://www.investor-dynamics.com/> - I<Letting you know what
+your market is thinking>.
+
+=head1 SEE ALSO
+
+L<Data::Google::Visualization::DataTable> - for preparing your data
+
+L<Python library that does the same thing|http://code.google.com/p/google-visualization-python/>
+
+L<Google Visualization API|http://code.google.com/apis/visualization/documentation/reference.html#dataparam>.
+
+L<Github Page for this code|https://github.com/sheriff/data-google-visualization-datatable-perl>
+
+=head1 COPYRIGHT
+
+Copyright 2012 Investor Dynamics Ltd, some rights reserved.
+
+This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
+
+1;
+
+__DATA__
+
 
 
 
@@ -229,7 +455,7 @@ everything else below in by hand, and that'd be boring...
 If you specify this AND one of the parameters below, then the one you've
 specified by hand will 'win'.
 
-=head2 reqID
+=head2 reqId
 
 Required, and required to be an int. As specified in
 L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>).
@@ -267,7 +493,7 @@ Ignored for now, as we only support JSON output types currently.
 # Inputs
 has 'datatable' => ( is => 'ro', isa => 'Data::Google::Visualization::DataTable' );
 has 'datasource_auth' => ( is => 'ro', isa => 'Str', required => 0 );
-has 'reqID' => ( is => 'ro', isa => 'Int', default => 0 );
+has 'reqId' => ( is => 'ro', isa => 'Int', default => 0 );
 has 'version' => ( is => 'ro', isa => 'Str', required => 0 );
 has 'sig' => ( is => 'ro', isa => 'Str', required => 0 );
 has 'out' => ( is => 'ro', isa => 'Str', default => 'json' );
@@ -306,41 +532,3 @@ sub BUILD {
 
 }
 
-=head1 BUGS, TODO
-
-It'd be nice to support the other data types, but currently
-L<Data::Google::Visualization::DataTable> serializes its data a little too early
-which makes this impracticle. I tend to do hassle-related development, so if you
-are in desparate need of this feature, I recommend emailing me.
-
-=head1 SUPPORT
-
-If you find a bug, please use
-L<this modules page on the CPAN bug tracker|https://rt.cpan.org/Ticket/Create.html?Queue=Data-Google-Visualization-DataSource>
-to raise it, or I might never see.
-
-=head1 AUTHOR
-
-Peter Sergeant C<pete@clueball.com> on behalf of
-L<Investor Dynamics|http://www.investor-dynamics.com/> - I<Letting you know what
-your market is thinking>.
-
-=head1 SEE ALSO
-
-L<Data::Google::Visualization::DataTable> - for preparing your data
-
-L<Python library that does the same thing|http://code.google.com/p/google-visualization-python/>
-
-L<Google Visualization API|http://code.google.com/apis/visualization/documentation/reference.html#dataparam>.
-
-L<Github Page for this code|https://github.com/sheriff/data-google-visualization-datatable-perl>
-
-=head1 COPYRIGHT
-
-Copyright 2012 Investor Dynamics Ltd, some rights reserved.
-
-This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
-
-=cut
-
-1;
