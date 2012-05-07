@@ -5,6 +5,8 @@ use warnings;
 
 use Moose;
 use Clone::Fast qw/clone/;
+use JSON::XS;
+use Digest::MD5 qw/md5_hex/;
 
 =head1 NAME
 
@@ -12,7 +14,7 @@ Data::Google::Visualization::DataSource - Google Chart Datasources
 
 =head1 DESCRIPTION
 
-Helper class for implementing the Google Chart Tools Datasource Protocol (V0.6)
+Helper class for implementing the Google Chart Tools Datasource Protocol (v0.6)
 
 =head1 SYNOPSIS
 
@@ -33,7 +35,7 @@ Helper class for implementing the Google Chart Tools Datasource Protocol (V0.6)
 
 =head1 OVERVIEW
 
-The L<Google Visualization API|http://code.google.com/apis/visualization/documentation/reference.html#dataparam>
+The L<Google Visualization API|https://developers.google.com/chart/interactive/docs/reference>
 is a nifty bit of kit for generating pretty pictures from your data. By design
 it has a fair amount of Google-cruft, such as non-standard JSON and stuffing
 configuration options in to a single CGI query parameter. It's also got somewhat
@@ -84,6 +86,12 @@ and the C<X-DataSource-Auth> header.
 
  # Give the user what they requested
  ->new({ tqx => $q->param('tqx') });
+
+ # Be conscientious and pass in contents of X-DataSource-Auth
+ ->new({
+    tqx => $q->param('tqx'),
+    datasource_auth => $q->header('X-DataSource-Auth')
+ });
 
  # Set it by hand...
  ->new({ reqId => 3, out => 'json', sig => 'deadbeef' });
@@ -138,7 +146,7 @@ has 'reqId' => # Set to Str as we only want to throw an error at inst time
 has 'version' =>
     ( is => 'rw', isa => 'Str', required => 0 );
 has 'sig' =>
-    ( is => 'rw', isa => 'Str', required => 0 );
+    ( is => 'rw', isa => 'Str', required => 0, default => '' );
 has 'out' =>
     ( is => 'rw', isa => 'Str', default => 'json' );
 has 'responseHandler' =>
@@ -206,7 +214,7 @@ has 'messages' => ( is => 'rw', isa => 'HashRef[ArrayRef]',
         { errors => [], warnings => [] }
     } );
 
-die "Implement add_message";
+warn "Implement add_message";
 sub add_message {
 
 }
@@ -279,22 +287,6 @@ it - it's expected in the normal course of use.
 
 =cut
 
-
- 1. Have any error messages been added? If so, discard all but the first, set
-    the response status to 'error', and discard the DataTable and all warning
-    messages. We discard all the other messages (error and warning) to prevent
-    malicious data discovery.
-
- 2. An integrity check is run on the attributes that have been set. We check the
-    attributes listed above, and generate any needed messages from those. If we
-    generate any error messages, step 1 is rerun.
-
- 2. Have any warning messages been added? If so, set the response status to
-    'warning'. Include all warning messages and the DataTable in the response.
-
- 3. If there are no warning or error messages, set the response status to 'ok',
-    and include the DataTable in the response.
-
 sub serialize {
     my $self = shift;
 
@@ -319,18 +311,74 @@ sub serialize {
 
         # We don't actually have anything more to add at this point, except the
         # type-appropriate wrapping.
-        return $header, $self->_wrap( $payload ), clone( $self->messages );
+        return $headers, $self->_wrap( $payload ), clone( $self->messages );
 
     } elsif ( $self->messages->{'warnings'}->[0] ) {
         # Set the status to warning
-        $payload->{'status'} = 'warning'
+        $payload->{'status'} = 'warning';
+        $payload->{'warnings'} = clone($self->messages->{'warnings'});
+    } else {
+        $payload->{'status'} = 'ok';
     }
 
     # Add any data
-    # Check for non-modified via sig
-    # Generate the payload, again
+    die "You must set a Data::Google::Visualization::DataTable via 'datatable' unless you've set an error message"
+        unless ( $self->datatable && $self->datatable->can('output_javascript') );
+    $payload->{'table'} = $self->datatable->output_javascript;
+
+    # Check for non-modified via sig. We need a way of serializing
+    # the payload hash in the same way each time, which means ordering
+    # the keys
+    my $checksum_data =
+        encode_json [$headers, @{$payload}{qw/ status table warnings /}];
+    my $checksum = md5_hex( $checksum_data );
+    $payload->{'sig'} = $checksum;
+
+    if ( $self->sig eq $checksum_data ) {
+        return $headers, $self->_wrap({
+            status => 'error',
+            errors => [{reason => 'not_modified', message => 'Data not modified'}]
+        }), clone( $self->messages );
+    }
+
+    # OK, all good. Let's do this...
+    return $headers, $self->_wrap( $payload ), clone( $self->messages );
+}
+
+my $_placeholder = "2ox3Rb3dxrYisGnZPMkgiqiwsdeCLFv8eb3atZbjdCYWYdmR6i";
+sub _wrap {
+    my ( $self, $payload ) = @_;
+
+    # Generate the payload. Because of the fake JSON, we're going to
+    # create a JSON-a-like string with a placeholder, and then put
+    # the datatable in that placeholder.
+    my $potential = encode_json({
+        status => $payload->{'status'},
+        ( $self->messages->{'errors'}->[0] ?
+            ( errors => [$self->messages->{'errors'}->[0]] ) :
+            ( $self->messages->{'warnings'}->[0] ?
+                ( warnings => $self->messages->{'warnings'} ) :
+                ()
+            )
+        ),
+        ($payload->{'table'} ?
+            ( table => $_placeholder ) : () ),
+        ( $payload->{'sig'} ? (sig => $payload->{'sig'}) : () )
+    });
+    if ( my $dt = $payload->{'table'} ) {
+        $potential =~ s/$_placeholder/$dt/;
+    }
+
     # Wrap it as appropriate
+    unless ( $self->datasource_auth ) {
+        my $wrap = $self->responseHandler;
+        $potential = sprintf(
+            "%s(%s);", $wrap, $potential
+        );
+    }
+
     # Hand it all back to the user
+    return $potential;
 }
 
 =head1 BUGS, TODO
@@ -371,164 +419,4 @@ This program is free software; you can redistribute it and/or modify it under th
 =cut
 
 1;
-
-__DATA__
-
-
-
-
-
-
-
-
-
-
-
-
-
- # Then create your datasource
- my $datasource = Data::Google::Visualization::DataSource->new({
-
-    datatable       => $datatable,
-    datasource_auth => $q->param('X-DataSource-Auth'),
-
-    # While you can specify the incoming attributes by hand, you should just
-    # let this module do it by passing it whatever the user sent in as tqx
-    tqx             => $q->param('tqx')
-
- });
-
- # You're ready to go!
-
- # HTTP Status will be 200 or 400. This example only prints something for 400
- # as any sensible webserver defaults to 200 if nothing's included
- print "Status: 400 Bad Request\n" if $datasource->http_status == 400;
-
- print "Content-type: text/javascript\n";
-
- # Print whatever it was the user wanted anyway...
- print "\n" . $datasource->body;
-
-=head1 OVERVIEW
-
-The L<Google Visualization API|http://code.google.com/apis/visualization/documentation/reference.html#dataparam>
-is a nifty bit of kit for generating pretty pictures from your data. By design
-it has a fair amount of Google-cruft, such as non-standard JSON and stuffing
-configuration options in to a single CGI query parameter.
-
-While you'll want to use L<Data::Google::Visualization::DataTable> for creating
-the datatables that power the API, if you want to make your data available as a
-generic data source for charts, you need to implement the I<Google Chart Tools
-Datasource Protocol>, or I<Google Visualization API wire protocol>, or whatever
-it is they've decided to call it today!
-
-This attempts to make that whole process as painless as possible.
-
-This module implement a single one-shot class, that does all of its magic at
-instantiation time based on the attributes you provide. It then makes available
-for you to return with whatever you're using to serve HTTP requests. Good luck,
-commander.
-
-=head1 INPUTS
-
-=head2 datatable
-
-A L<Data::Google::Visualization::DataTable> object. You don't actually need to
-specify this, but if you don't, it won't get sent to the user. The only use for
-not specifying this is if you're intending to add an error status.
-
-=head2 datasource_auth
-
-Defaults to 0. According to the documentation, when this has been set then
-requests for JSON should come back as actual JSON, but when it hasn't been, they
-should come back as JSONP using the C<responseHandler> attribute below. Even
-having read the docs a few times, this seems a little strange to me, so try
-reading it yourself, and see what you think.
-
-=head2 tqx
-
-If you pass in whatever the user sent you as the C<tqx> string (see:
-L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>)
-then we'll unpack the rest of the parameters. Otherwise, you'll need to pass
-everything else below in by hand, and that'd be boring...
-
-If you specify this AND one of the parameters below, then the one you've
-specified by hand will 'win'.
-
-=head2 reqId
-
-Required, and required to be an int. As specified in
-L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>).
-The dirty secret here is that actually, according to all the examples on the
-linked page, it isn't really required at all. So it defaults to 0 if you don't
-specify it.
-
-=head2 version
-
-As of this version, we save this, but DO NOT ACT ON IT. This module does not
-guarantee to support anything other than version 0.6. Patches welcome.
-
-=head2 sig
-
-As specified in
-L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>)
-
-=head2 out
-
-As specified in
-L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>).
-This module supports C<json> only.
-
-=head2 responseHandler
-
-As specified in
-L<Request Format|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#requestformat>)
-
-=head2 outFileName
-
-Ignored for now, as we only support JSON output types currently.
-
-=cut
-
-# Inputs
-has 'datatable' => ( is => 'ro', isa => 'Data::Google::Visualization::DataTable' );
-has 'datasource_auth' => ( is => 'ro', isa => 'Str', required => 0 );
-has 'reqId' => ( is => 'ro', isa => 'Int', default => 0 );
-has 'version' => ( is => 'ro', isa => 'Str', required => 0 );
-has 'sig' => ( is => 'ro', isa => 'Str', required => 0 );
-has 'out' => ( is => 'ro', isa => 'Str', default => 'json' );
-has 'responseHandler' => ( is => 'ro', isa => 'Str', default => 'google.visualization.Query.setResponse' );
-has 'outFileName' => ( is => 'ro', isa => 'Str', required => 0 );
-
-=head1 OUTPUTS
-
-=head2 body_data
-
-This is the Perl data structure which will be serialized when you call C<body>.
-It corresponds to the response format specified in:
-L<Response Format (JSON)|https://developers.google.com/chart/interactive/docs/dev/implementing_data_source#jsondatatable>.
-You can actually mess with it if you like before calling C<body()>, but no
-error checking of this is done.
-
-=cut
-
-
-around BUILDARGS => sub {
-    my $orig  = shift;
-    my $class = shift;
-
-    my $options = shift;
-    my $tqx = delete $options->{'tqx'} || '';
-    for my $option ( split(/;/, $tqx ) ) {
-        my ( $key, $value ) = split(/;/, $option);
-        $options->{ $key } = $value;
-    }
-
-    $class->$orig( $options );
-};
-
-sub BUILD {
-    use Data::Printer;
-
-}
 

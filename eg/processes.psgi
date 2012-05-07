@@ -3,18 +3,25 @@
 use strict;
 use warnings;
 
+use lib 'lib';
+use CGI::PSGI;
 use Time::Duration;
 use Number::Format qw(:subs);
 use Proc::ProcessTable;
 use Data::Google::Visualization::DataTable;
+use Data::Google::Visualization::DataSource;
 
 sub {
     my $env = shift;
 
     # Local addresses only!
+    my $q = CGI::PSGI->new($env);
 
-
-    use Data::Printer; p $env;
+    # Step 1: Create the container based on the HTTP request
+    my $datasource = Data::Google::Visualization::DataSource->new({
+        tqx => $q->param('tqx'),
+        xda => ($q->header('X-DataSource-Auth') || undef)
+    });
 
     my $datatable = Data::Google::Visualization::DataTable->new();
     $datatable->add_columns(
@@ -39,4 +46,12 @@ sub {
         });
     }
 
+    # Step 2: Add data
+    $datasource->datatable( $datatable );
+
+    SERIALIZE:
+    # Step 3: Show the user...
+    my ( $headers, $body ) = $datasource->serialize;
+
+    return [ $q->psgi_header, [ $body ] ];
 }

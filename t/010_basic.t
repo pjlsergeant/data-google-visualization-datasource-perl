@@ -33,4 +33,7 @@ for my $test (
 	my $datasource = Data::Google::Visualization::DataSource->new(
 		$test->{'input'}
 	);
+	use Data::Printer;
+	my $output = [$datasource->serialize];
+	p $output;
 }
