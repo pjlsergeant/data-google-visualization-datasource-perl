@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Moose;
-use Clone::Fast qw/clone/;
+use Clone qw/clone/;
 use JSON::XS;
 use Digest::MD5 qw/md5_hex/;
 
@@ -154,6 +154,9 @@ has 'responseHandler' =>
 has 'outFileName' =>
     ( is => 'rw', isa => 'Str', required => 0 );
 
+my %allowed_keys = map { $_ => 1 }
+    qw/reqId version sig out responseHandler outFileName/;
+
 around BUILDARGS => sub {
     my $orig  = shift;
     my $class = shift;
@@ -161,8 +164,8 @@ around BUILDARGS => sub {
     my $options = shift;
     my $tqx = delete $options->{'tqx'} || '';
     for my $option ( split(/;/, $tqx ) ) {
-        my ( $key, $value ) = split(/;/, $option);
-        $options->{ $key } = $value;
+        my ( $key, $value ) = split(/:/, $option);
+        $options->{ $key } = $value if $allowed_keys{ $key };
     }
 
     $class->$orig( $options );
@@ -213,10 +216,43 @@ has 'messages' => ( is => 'rw', isa => 'HashRef[ArrayRef]',
     default => sub {
         { errors => [], warnings => [] }
     } );
+our $allowed_messages = {
+    warning => {
+        data_truncated => 1,
+        other => 1,
+    },
+    error => {
+        not_modified => 1,
+        user_not_authenticated => 1,
+        unknown_data_source_id => 1,
+        access_denied => 1,
+        unsupported_query_operation => 1,
+        invalid_query => 1,
+        invalid_request => 1,
+        internal_error => 1,
+        not_supported => 1,
+        illegal_formatting_patterns => 1,
+        other => 1,
+    }
+};
 
-warn "Implement add_message";
 sub add_message {
+    my ( $self, $options ) = @_;
+    die sprintf(
+        "Type: %s Reason: %s not permitted by spec",
+        $options->{'type'}, $options->{'reason'}
+    ) unless $allowed_messages
+        ->{$options->{'type'}}
+        ->{$options->{'reason'}};
 
+    my $message = {
+        reason => $options->{'reason'},
+        ( $options->{'message'} ? (message => $options->{'message'}) : () ),
+        ( $options->{'detailed_message'} ?
+            (message => $options->{'detailed_message'}) : () ),
+    };
+    push( @{ $self->messages->{ $options->{ 'type' } . 's'} }, $message);
+    $message;
 }
 
 =head3 datatable
@@ -298,7 +334,7 @@ sub serialize {
 
     # Build the default headers
     my $headers = [
-        [ 'Content-Type', 'text/javascript' ]
+        [ 'Content-type', 'text/javascript' ]
     ];
 
     # Work with the messages
@@ -353,6 +389,7 @@ sub _wrap {
     # create a JSON-a-like string with a placeholder, and then put
     # the datatable in that placeholder.
     my $potential = encode_json({
+        reqId => $self->reqId,
         status => $payload->{'status'},
         ( $self->messages->{'errors'}->[0] ?
             ( errors => [$self->messages->{'errors'}->[0]] ) :
@@ -366,7 +403,7 @@ sub _wrap {
         ( $payload->{'sig'} ? (sig => $payload->{'sig'}) : () )
     });
     if ( my $dt = $payload->{'table'} ) {
-        $potential =~ s/$_placeholder/$dt/;
+        $potential =~ s/"$_placeholder"/$dt/;
     }
 
     # Wrap it as appropriate
@@ -396,9 +433,7 @@ to raise it, or I might never see.
 
 =head1 AUTHOR
 
-Peter Sergeant C<pete@clueball.com> on behalf of
-L<Investor Dynamics|http://www.investor-dynamics.com/> - I<Letting you know what
-your market is thinking>.
+Peter Sergeant C<pete@clueball.com>
 
 =head1 SEE ALSO
 
@@ -412,7 +447,7 @@ L<Github Page for this code|https://github.com/sheriff/data-google-visualization
 
 =head1 COPYRIGHT
 
-Copyright 2012 Investor Dynamics Ltd, some rights reserved.
+Copyright 2012 Peter Sergeant, some rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 

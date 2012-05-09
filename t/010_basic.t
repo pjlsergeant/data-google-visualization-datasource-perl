@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 use Test::More;
-
+use JSON::XS;
 use Data::Google::Visualization::DataTable;
 use Data::Google::Visualization::DataSource;
 
@@ -11,11 +11,10 @@ use Data::Google::Visualization::DataSource;
 my $datatable = Data::Google::Visualization::DataTable->new();
 $datatable->add_columns(
     { id => 'person', label => "Person", type => 'string', },
-    { id => 'dob',    label => "Born",   type => 'date',   },
 );
 $datatable->add_rows(
-	{ person => "Steve Jobs", dob => [1995, 2 -1, 24]},
-	{ person => "Lou Reed",   dob => [1942, 3 -1,  2]},
+	{ person => "Steve Jobs" },
+	{ person => "Lou Reed"   },
 );
 
 # Check various inputs do something sane
@@ -24,16 +23,23 @@ for my $test (
 		name => "All the defaults",
 		input => {
 			datatable => $datatable,
+			reqId => 5,
 		},
 		expected => {
-			reqID => 0,
+			reqId => 5,
+			status => 'ok',
 		}
 	}
 ) {
 	my $datasource = Data::Google::Visualization::DataSource->new(
-		$test->{'input'}
+		{ %{$test->{'input'}}, datasource_auth => 'boom' }
 	);
-	use Data::Printer;
-	my $output = [$datasource->serialize];
-	p $output;
+	my ( $header, $payload ) = $datasource->serialize;
+	$payload = decode_json( $payload );
+	for my $key ( keys %{$test->{'expected'}} ) {
+		is( $payload->{$key}, $test->{'expected'}->{$key},
+			"$key matches" );
+	}
 }
+
+done_testing();

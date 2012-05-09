@@ -19,8 +19,15 @@ sub {
 
     # Step 1: Create the container based on the HTTP request
     my $datasource = Data::Google::Visualization::DataSource->new({
-        tqx => $q->param('tqx'),
-        xda => ($q->header('X-DataSource-Auth') || undef)
+        tqx => ($q->param('tqx') || undef),
+        xda => ($q->header('X-DataSource-Auth') || undef),
+    });
+
+    $datasource->add_message({
+        type => 'warning',
+        reason => 'other',
+        message => 'Flux capacitor',
+        detailed_message => 'Flux capacitor just isnae working',
     });
 
     my $datatable = Data::Google::Visualization::DataTable->new();
@@ -52,6 +59,6 @@ sub {
     SERIALIZE:
     # Step 3: Show the user...
     my ( $headers, $body ) = $datasource->serialize;
-
-    return [ $q->psgi_header, [ $body ] ];
+    my %headers = map { @$_ } @$headers;
+    return [ $q->psgi_header(\%headers), [ $body ] ];
 }
